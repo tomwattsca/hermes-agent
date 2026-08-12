@@ -129,10 +129,13 @@ def test_gui_install_env_prepends_managed_node_on_bare_path(tmp_path, monkeypatc
     monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
     _make_packaged_executable(root, monkeypatch)
 
-    # A managed Node tree on disk so with_hermes_node_path() actually prepends it.
-    home = tmp_path / "hermes-home"
-    (home / "node" / "bin").mkdir(parents=True)
-    monkeypatch.setenv("HERMES_HOME", str(home))
+    # A managed Node tree on disk so with_hermes_node_path() actually
+    # prepends it. It lives in the INSTALL's runtime dir, not HERMES_HOME
+    # (hermes-home lifetime split): binaries belong to an install.
+    install_root = tmp_path / "install"
+    (install_root / ".hermes-runtime" / "node" / "bin").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_INSTALL_ROOT", str(install_root))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     # Simulate the stripped PATH the desktop updater chain hands us.
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
 

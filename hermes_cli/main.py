@@ -7060,6 +7060,9 @@ def cmd_gui(args: argparse.Namespace):
     else:
         env["HERMES_DESKTOP_CWD"] = os.getcwd()
 
+    # allow building variants
+    env["HERMES_DESKTOP_VARIANT"] = os.environ.get("HERMES_DESKTOP_VARIANT", "")
+
     # Desktop launch options from config.yaml (`desktop.electron_flags`,
     # `desktop.disable_gpu`). The GPU policy is bridged to the env var the
     # Electron app already reads; an explicit env var still wins over config so

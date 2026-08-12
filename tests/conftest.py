@@ -250,6 +250,10 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_VOICE",
     "HERMES_VOICE_TTS",
     "HERMES_YOLO_MODE",
+    # Points managed-runtime resolution at an install tree. The fixture
+    # sets it to a tempdir below; blanking first means a developer's own
+    # export cannot survive into a test that deliberately unsets it.
+    "HERMES_INSTALL_ROOT",
     "HERMES_INTERACTIVE",
     "HERMES_QUIET",
     "HERMES_TOOL_PROGRESS",
@@ -467,6 +471,17 @@ def _hermetic_environment(tmp_path, monkeypatch):
     (fake_hermes_home / "memories").mkdir()
     (fake_hermes_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_hermes_home))
+
+    # 3a. Redirect the INSTALL root too. Managed runtime tools (node, uv,
+    #     git, gh, ripgrep) resolve from ``<install>/.hermes-runtime``, which
+    #     for a source checkout is inside the repo — so without this a test
+    #     asserting "no managed node, fall back to PATH" instead finds the
+    #     developer's real provisioned Node and fails, and a test that
+    #     provisions writes into the working tree. Same reasoning as
+    #     HERMES_HOME above, different lifetime.
+    fake_install_root = tmp_path / "install_test"
+    fake_install_root.mkdir()
+    monkeypatch.setenv("HERMES_INSTALL_ROOT", str(fake_install_root))
 
     # 3b. hermes_state computes ``DEFAULT_DB_PATH = get_hermes_home() / "state.db"``
     #     at import time. When the module is first imported at collection (any
