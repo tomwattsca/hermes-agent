@@ -1277,6 +1277,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         from tools.process_registry_notifications import should_surface_notification
         if not should_surface_notification(evt):
             return None  # Suppressed noise is terminal, not a consumed process result.
+        queued_evt = evt  # the caller's (queued) copy: ``evt`` is rebound to enriched copies below
         restore_completion_route(self, str(evt.get("session_key") or ""))
         identity = self._completion_delivery_identity(evt)
         claim = self._CompletionClaim()
@@ -1315,6 +1316,11 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             # ``dropped`` across restarts too (#141153); any other (restart wait, full FIFO, an owner
             # not yet proven) is refunded and never drops a completion the owner will take later.
             refused = not exc.permanent
+            if exc.reason == "turn_lease":
+                # A busy parent frees within seconds of its turn ending: retry at the base cadence
+                # rather than the escalated backoff, so the result lands before the client's next turn.
+                for queued in (queued_evt, *(sibling for sibling, _claim_id in sibling_claims)):
+                    queued["_turn_lease_wait"] = True
             return False
         finally:
             if identity_claimed and not accepted:
@@ -1685,7 +1691,12 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         """Space out an undelivered async group's retries instead of re-offering it every 2 s pass.
         The backoff only paces; the durable ledger decides when a row gives up (a permanent refusal
         spends a delivery attempt there, so the count survives restarts) (#141153)."""
+        busy_parent = any(evt.pop("_turn_lease_wait", False) for evt in list(group))
         for evt in group:
+            evt.pop("_turn_lease_wait", None)
+            if busy_parent:
+                evt["_watch_next_retry_at"] = time.monotonic() + _WATCH_INJECTION_RETRY_BASE_DELAY
+                continue
             step = int(evt.get("_watch_retry_step") or 0) + 1
             evt["_watch_retry_step"] = step
             evt["_watch_next_retry_at"] = _refusal_retry_at(step)

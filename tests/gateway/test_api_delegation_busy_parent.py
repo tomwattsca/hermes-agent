@@ -146,3 +146,46 @@ def test_result_survives_a_parent_turn_longer_than_the_delivery_budget(
     assert _ledger_row(tmp_path, evt["delegation_id"])[0] == "delivered"
     rows = [m for m in db.get_messages("api-parent") if m.get("display_kind") == "async_delegation_complete"]
     assert len(rows) == 1
+
+
+def test_busy_parent_retries_at_base_cadence_so_result_lands_promptly(
+    monkeypatch, tmp_path, isolated_registry,
+):
+    """The client starts its next turn seconds after one ends; an escalated 60 s backoff loses that
+    race every time, so a busy-parent wait must keep retrying at the base cadence."""
+    from hermes_state import SessionDB
+    from tools import async_delegation
+    from tests.module_clock import install_module_clock
+
+    db = SessionDB(db_path=tmp_path / "sessions.db")
+    db.create_session("api-parent", source="api_server")
+    assert db.acquire_session_turn_lease("api-parent", "client-turn", wait_seconds=0)
+    evt = _api_event("deleg_cadence")
+    async_delegation._persist_dispatch({
+        "delegation_id": evt["delegation_id"], "session_key": evt["session_key"],
+        "origin_ui_session_id": "", "parent_session_id": None, "dispatched_at": evt["dispatched_at"],
+    })
+    async_delegation._persist_completion(evt, {"status": "completed", "summary": evt["summary"]})
+    q = queue.Queue()
+    monkeypatch.setattr(isolated_registry, "completion_queue", q)
+    q.put(evt)
+    runner = _api_runner(db)
+    clock = install_module_clock(monkeypatch, run_notifications)
+    state = {"n": 0, "released_at": None, "landed_at": None}
+
+    async def _tick(_delay):
+        state["n"] += 1
+        clock.now += 5
+        if state["n"] == 20:  # 100 s busy: far past the point an escalating backoff reaches 60 s
+            db.release_session_turn_lease("api-parent", "client-turn")
+            state["released_at"] = state["n"]
+        if state["released_at"] and state["landed_at"] is None \
+                and _ledger_row(tmp_path, evt["delegation_id"])[0] == "delivered":
+            state["landed_at"] = state["n"]
+        if state["n"] >= 40:
+            runner._running = False
+
+    monkeypatch.setattr(asyncio, "sleep", _tick)
+    asyncio.run(runner._async_delegation_watcher(interval=0))
+    assert state["landed_at"] is not None
+    assert state["landed_at"] - state["released_at"] <= 3  # within ~15 s, not up to 60 s
