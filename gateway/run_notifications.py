@@ -826,6 +826,16 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 await deliver()
             return True
         except Exception as e:
+            from hermes_state_errors import SessionTurnLeaseLostError
+            if evt.get("type") == "async_delegation" and isinstance(e, SessionTurnLeaseLostError):
+                # The parent session is mid-turn: the store refuses a detached row until that turn
+                # ends. Transient by construction (the lease is released or goes stale), so refund
+                # the durable attempt instead of spending it — otherwise any parent turn longer than
+                # the backoff window (~4 min) drops a finished result for good.
+                from gateway.wake import WakeNotAccepted
+                logger.info("Async delegation completion for api_server session %s waits for its "
+                            "active turn to end (attempt refunded): %s", raw_sid, e)
+                raise WakeNotAccepted(str(e), reason="turn_lease") from e
             logger.warning(fail, raw_sid, e)
             return False
 
