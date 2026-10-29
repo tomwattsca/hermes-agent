@@ -288,11 +288,32 @@ def recover_api_turns(adapter):
             recover_authority_api_turns(adapter, authority)
 
 
+def _collect_unheld_api_images_off_loop(authority):
+    """Startup's retained-image sweep reads every transcript row (``_history_mentions``): on a large
+    store that is minutes of CPU, and run inline it blocked the event loop past the liveness
+    watchdog, so every restart was killed with exit 75 and retried until the page cache was warm.
+    Run it on a daemon thread instead, in the caller's owner scope (``copy_context`` carries the
+    profile's home override). Concurrent turns are safe: ``release_unheld_media`` re-checks holders
+    under the write lock, as the post-delete sweep in ``api_server`` already relies on."""
+    import contextvars
+    import logging
+    import threading
+    from gateway.session_ingress_media import collect_unheld_api_images
+    ctx = contextvars.copy_context()
+
+    def _sweep():
+        try:
+            ctx.run(collect_unheld_api_images, authority.db)
+        except Exception:
+            logging.getLogger(__name__).warning('Startup API image collection failed; files stay for the next sweep',
+                                                exc_info=True)
+    threading.Thread(target=_sweep, name='api-image-startup-sweep', daemon=True).start()
+
+
 def recover_authority_api_turns(adapter, authority):
     from hermes_state_runtime import list_session_admissions
-    from gateway.session_ingress_media import collect_unheld_api_images
     import logging
-    collect_unheld_api_images(authority.db)
+    _collect_unheld_api_images_off_loop(authority)
     from gateway.session_api_media import compact_settled_api_payloads
     compact_settled_api_payloads(authority.db)
     with authority.db._read_ctx() as conn:

@@ -80,6 +80,7 @@ async def test_restart_recovery_keeps_every_profiles_held_images_and_collects_ea
         assert beta_orphan.is_relative_to(beta) and launch_held.is_relative_to(launch / 'cache')
 
         recover_api_turns(adapter)  # the gateway's unscoped startup pass over every served profile
+        _join_startup_sweeps()
 
         assert launch_held.read_bytes() == PNG + b'launch', 'a secondary profile collected the launch image'
         assert not launch_orphan.exists()
@@ -87,6 +88,7 @@ async def test_restart_recovery_keeps_every_profiles_held_images_and_collects_ea
         with _profile_runtime_scope(beta, hydrate_secrets=False):
             beta_held = completed_image_turn(authorities['beta'], PNG + b'beta')
         recover_api_turns(adapter)
+        _join_startup_sweeps()
         assert beta_held.read_bytes() == PNG + b'beta'
         assert launch_held.read_bytes() == PNG + b'launch'
     finally:
@@ -94,3 +96,12 @@ async def test_restart_recovery_keeps_every_profiles_held_images_and_collects_ea
         adapter._run_idempotency_store.close()
         for authority in authorities.values():
             authority.db.close()
+
+
+def _join_startup_sweeps(timeout=30.0):
+    """Startup image collection runs off the event loop; wait for it before asserting on files."""
+    import threading
+    for thread in threading.enumerate():
+        if thread.name == 'api-image-startup-sweep':
+            thread.join(timeout)
+            assert not thread.is_alive(), 'startup image sweep did not finish'

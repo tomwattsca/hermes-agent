@@ -29,6 +29,15 @@ def _mention(owner, digest, name):
     owner.db.append_message('keeper', 'user', f'notes {digest}/{name}')
 
 
+def _join_startup_sweeps(timeout=30.0):
+    """Startup image collection runs off the event loop; wait for it before asserting on files."""
+    import threading
+    for thread in threading.enumerate():
+        if thread.name == 'api-image-startup-sweep':
+            thread.join(timeout)
+            assert not thread.is_alive(), 'startup image sweep did not finish'
+
+
 def _remaining(planted):
     return [digest for digest, path in planted if path.exists()]
 
@@ -105,6 +114,7 @@ def test_startup_recovery_survives_a_thousand_api_images(api, owner, monkeypatch
     monkeypatch.setattr(owner, '_schedule', lambda ref: scheduled.append(ref.session_id))
     recover_api_turns(api)
     assert scheduled == ['queued']
+    _join_startup_sweeps()
     assert _remaining(planted) == [kept_digest]
 
 
@@ -120,4 +130,36 @@ def test_startup_recovery_continues_when_image_collection_fails(api, owner, monk
     monkeypatch.setattr(owner, '_schedule', lambda ref: scheduled.append(ref.session_id))
     recover_api_turns(api)
     assert scheduled == ['queued']
+    _join_startup_sweeps()
     assert 'API image collection failed' in caplog.text
+
+
+def test_startup_image_collection_never_blocks_recovery(api, owner, monkeypatch):
+    """The sweep reads every transcript row: on a large store that took minutes and, run inline on
+    the event loop, outlasted the liveness watchdog so every restart died with exit 75. Recovery
+    (and so the loop) must return while collection is still running."""
+    import threading
+    import time
+    admit_api_turn(api, session_id='queued', request_id='queued-turn',
+                   user_message='pending', conversation_history=[])
+    planted = _plant(3)
+    release, entered = threading.Event(), threading.Event()
+    from gateway import session_ingress_media
+    real = session_ingress_media._history_mentions
+
+    def slow_scan(conn, references, after_id=0):
+        entered.set()
+        assert release.wait(10.0)
+        return real(conn, references, after_id)
+    monkeypatch.setattr(session_ingress_media, '_history_mentions', slow_scan)
+    scheduled = []
+    monkeypatch.setattr(owner, '_schedule', lambda ref: scheduled.append(ref.session_id))
+    started = time.monotonic()
+    recover_api_turns(api)
+    assert time.monotonic() - started < 2.0, 'startup recovery waited for the history scan'
+    assert scheduled == ['queued']
+    assert entered.wait(5.0), 'the startup sweep never ran'
+    assert len(_remaining(planted)) == 3
+    release.set()
+    _join_startup_sweeps()
+    assert _remaining(planted) == []

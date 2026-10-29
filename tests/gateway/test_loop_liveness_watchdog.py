@@ -360,3 +360,28 @@ def test_heartbeat_write_does_not_block_the_loop_it_monitors():
     assert ticks >= 5, (
         f'the loop made only {ticks:d} tick(s) while the heartbeat was writing — the write is blocking the loop again'
     )
+
+
+def test_watchdog_dump_writes_the_event_loop_thread_before_the_capped_dump(tmp_path):
+    # faulthandler stops after 100 threads, newest first: on a busy gateway the main (event loop)
+    # thread - the one a liveness death is about - was the one cut off.
+    from gateway.shutdown_watchdog import _write_watchdog_dump
+    gate = threading.Event()
+    extra = [threading.Thread(target=gate.wait, daemon=True) for _ in range(110)]
+    for thread in extra:
+        thread.start()
+    dump_path = tmp_path / "dump.log"
+    done = threading.Event()
+
+    def from_watchdog_thread():
+        _write_watchdog_dump(dump_path, delay_s=90.0, snapshot={"strikes": 3})
+        done.set()
+    threading.Thread(target=from_watchdog_thread, daemon=True).start()
+    try:
+        assert done.wait(10.0)
+    finally:
+        gate.set()
+    dump = dump_path.read_text(encoding="utf-8")
+    main_at = dump.index("--- main thread [")
+    assert main_at < dump.index("--- faulthandler dump (all threads) ---")
+    assert "test_watchdog_dump_writes_the_event_loop_thread_before_the_capped_dump" in dump[main_at:]

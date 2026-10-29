@@ -246,7 +246,18 @@ def _write_watchdog_dump(dump_path: Path, *, delay_s: float, snapshot: Optional[
     with contextlib.suppress(OSError):  # unwritable dir: skip only the file copy, stderr still runs
         dump_path.parent.mkdir(parents=True, exist_ok=True)
     with contextlib.suppress(Exception), open(dump_path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(header, default=str) + "\n--- faulthandler dump (all threads) ---\n")
+        fh.write(json.dumps(header, default=str) + "\n")
+        # faulthandler lists newest threads first and stops at 100, so on a busy gateway the oldest
+        # thread - the main thread running the event loop, the one a liveness death is about - was
+        # the one cut off. Write it first.
+        with contextlib.suppress(Exception):
+            import threading, traceback
+            main = threading.main_thread()
+            frame = sys._current_frames().get(main.ident) if main.ident is not None else None
+            if frame is not None:
+                fh.write(f"--- main thread [{main.name}] (event loop) ---\n")
+                fh.write("".join(traceback.format_stack(frame)))
+        fh.write("--- faulthandler dump (all threads) ---\n")
         fh.flush()
         try:
             faulthandler.dump_traceback(file=fh, all_threads=True)
